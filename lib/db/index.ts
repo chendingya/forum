@@ -2,14 +2,18 @@ import { getCollection } from "../mongodb";
 import { validateUser, validateUserSafe } from "../validation/user";
 import { validatePostSafe, validateQueriedPostSafe } from "../validation/post";
 import bcrypt from "bcrypt";
-import { Document, ObjectId, UpdateFilter } from "mongodb";
-import { QUser } from "@/schema/user";
-import { QPost } from "@/schema/post";
+import { Document, ObjectId, UpdateFilter, MongoServerError } from "mongodb";
+import { QUser, SUser } from "@/schema/user";
+import { Post, PostComment, QPost, SPost } from "@/schema/post";
+import { Result } from "@/types/common/result";
+import { json } from "node:stream/consumers";
 
-type AuthorMap = Map<string, QUser>;
+type AuthorMap = Map<string, SUser>;
 type InteractionPath = "interactions.likes" | "interactions.forwards";
 
-async function fetchAuthorsByIds(authorIds: string[]): Promise<AuthorMap> {
+export async function fetchAuthorsByIds(
+  authorIds: string[],
+): Promise<AuthorMap> {
   if (authorIds.length === 0) {
     return new Map();
   }
@@ -26,15 +30,17 @@ async function fetchAuthorsByIds(authorIds: string[]): Promise<AuthorMap> {
       map.set(author._id.toString(), {
         ...validatedUser,
         _id: author._id.toString(),
-      } as QUser);
+      });
     }
     return map;
   }, new Map());
 }
 
-export async function fetchAuthorById(authorId: string): Promise<QUser | null> {
+export async function fetchAuthorById(authorId: string): Promise<SUser | null> {
   const usersCollection = await getCollection<QUser>("users");
-  const author = await usersCollection.findOne({ _id: new ObjectId(authorId) });
+  const author = await usersCollection.findOne({
+    _id: new ObjectId(authorId),
+  });
 
   if (!author) return null;
 
@@ -44,12 +50,12 @@ export async function fetchAuthorById(authorId: string): Promise<QUser | null> {
   return {
     ...validatedUser,
     _id: author._id.toString(),
-  } as QUser;
+  };
 }
 
 async function attachAuthorsToPosts(
-  posts: QPost[],
-): Promise<(QPost & { author: QUser })[]> {
+  posts: SPost[],
+): Promise<(SPost & { author: SUser })[]> {
   if (!posts || posts.length === 0) {
     return [];
   }
@@ -66,15 +72,7 @@ async function attachAuthorsToPosts(
         return null;
       }
 
-      let author = authorMap.get(post.author);
-
-      if (!author) {
-        author = await fetchAuthorById(post.author);
-        if (author) {
-          authorMap.set(post.author, author);
-        }
-      }
-
+      const author: SUser | undefined = authorMap.get(post.author);
       if (!author) {
         console.warn(
           `Author not found for post ${post._id}, author ID: ${post.author}`,
@@ -90,7 +88,7 @@ async function attachAuthorsToPosts(
   );
 
   const validPosts = populated.filter(
-    (post): post is QPost & { author: QUser } => post !== null,
+    (post): post is SPost & { author: SUser } => post !== null,
   );
 
   console.log(
@@ -99,36 +97,16 @@ async function attachAuthorsToPosts(
   return validPosts;
 }
 
-async function loadInteractionUser(userId: string): Promise<QUser | null> {
-  const usersCollection = await getCollection("users");
-  const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-
-  if (!user) return null;
-
-  const validatedUser = validateUserSafe(user);
-  if (!validatedUser) return null;
-
-  return {
-    ...validatedUser,
-    _id: user._id.toString(),
-  } as QUser;
-}
-
 async function addUserToInteraction(
   postId: string,
   userId: string,
   interactionPath: InteractionPath,
-): Promise<QPost | null> {
+): Promise<SPost | null> {
   const postsCollection = await getCollection("posts");
-  const interactionUser = await loadInteractionUser(userId);
-
-  if (!interactionUser) {
-    return null;
-  }
 
   const update: UpdateFilter<Document> = {
     $addToSet: {
-      [interactionPath]: interactionUser,
+      [interactionPath]: new ObjectId(userId),
     },
     $set: { updatedAt: new Date() },
   };
@@ -151,7 +129,7 @@ async function addUserToInteraction(
 }
 
 // User operations
-export async function createUser(userData: unknown) {
+export async function createUser(userData: unknown): Promise<SUser> {
   const validatedUser = validateUser(userData);
 
   const usersCollection = await getCollection<QUser>("users");
@@ -163,7 +141,7 @@ export async function createUser(userData: unknown) {
   };
 }
 
-export async function findUserById(id: string) {
+export async function findUserById(id: string): Promise<SUser | null> {
   const usersCollection = await getCollection("users");
   const user = await usersCollection.findOne({ _id: new ObjectId(id) });
 
@@ -178,7 +156,7 @@ export async function findUserById(id: string) {
   };
 }
 
-export async function findUserByName(name: string) {
+export async function findUserByName(name: string): Promise<SUser | null> {
   const usersCollection = await getCollection("users");
   const user = await usersCollection.findOne({ name });
 
@@ -193,7 +171,7 @@ export async function findUserByName(name: string) {
   };
 }
 
-export async function findAllUsers() {
+export async function findAllUsers(): Promise<SUser[]> {
   const usersCollection = await getCollection("users");
   const users = await usersCollection.find({}).toArray();
 
@@ -210,7 +188,10 @@ export async function findAllUsers() {
     .filter((user) => user !== null);
 }
 
-export async function updateUserById(id: string, updates: unknown) {
+export async function updateUserById(
+  id: string,
+  updates: unknown,
+): Promise<SUser | null> {
   const usersCollection = await getCollection("users");
 
   // Validate updates
@@ -242,9 +223,44 @@ export async function updateUserById(id: string, updates: unknown) {
   };
 }
 
+export async function updateUserNameById(
+  id: string,
+  newName: string,
+): Promise<SUser | null> {
+  const usersCollection = await getCollection<QUser>("users");
+
+  // Ensure unique index on username; repeated calls are idempotent.
+  await usersCollection.createIndex({ name: 1 }, { unique: true });
+
+  try {
+    const result = await usersCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { name: newName, updatedAt: new Date() } },
+      { returnDocument: "after" },
+    );
+
+    if (!result) return null;
+
+    const validatedUser = validateUserSafe(result);
+    if (!validatedUser) return null;
+
+    return {
+      ...validatedUser,
+      _id: result._id.toString(),
+    };
+  } catch (error) {
+    if (error instanceof MongoServerError && error.code === 11000) {
+      throw new Error("Username already taken");
+    }
+    throw error;
+  }
+}
+
 export async function deleteUserById(id: string): Promise<boolean> {
   const usersCollection = await getCollection("users");
-  const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
+  const result = await usersCollection.deleteOne({
+    _id: new ObjectId(id),
+  });
   return result.deletedCount > 0;
 }
 
@@ -265,7 +281,7 @@ export async function generateCredentials(password: string) {
 }
 
 // Post operations
-export async function createPost(postData: unknown) {
+export async function createPost(postData: unknown): Promise<SPost> {
   const validatedPost = validatePostSafe(postData);
   if (!validatedPost) {
     throw new Error("Invalid post data");
@@ -279,7 +295,7 @@ export async function createPost(postData: unknown) {
   };
 }
 
-export async function findPostById(id: string): Promise<QPost | null> {
+export async function findPostById(id: string): Promise<SPost | null> {
   const postsCollection = await getCollection("posts");
   const post = await postsCollection.findOne({ _id: new ObjectId(id) });
 
@@ -294,7 +310,7 @@ export async function findPostById(id: string): Promise<QPost | null> {
   };
 }
 
-export async function findAllPosts(): Promise<QPost[]> {
+export async function findAllPosts(): Promise<SPost[]> {
   const postsCollection = await getCollection("posts");
   const posts = await postsCollection.find({}).toArray();
 
@@ -313,35 +329,27 @@ export async function findAllPosts(): Promise<QPost[]> {
 }
 
 export async function findAllPostsWithAuthors(): Promise<
-  (QPost & { author: QUser })[]
+  (SPost & { author: SUser })[]
 > {
   console.log("=== Starting findAllPostsWithAuthors ===");
-  const postsCollection = await getCollection("posts");
+  const postsCollection = await getCollection<QPost>("posts");
   const posts = await postsCollection.find({}).toArray();
   console.log(`Found ${posts.length} raw posts from database`);
 
   const sanitizedPosts = posts
     .map((rawPost) => {
-      console.log("Processing raw post:", {
-        _id: rawPost._id.toString(),
-        author: rawPost.author,
-        hasTitle: !!rawPost.title,
-        hasBody: !!rawPost.body,
-      });
-
-      const normalizedPost = {
-        ...rawPost,
-        _id: rawPost._id.toString(),
-        author: rawPost.author.toString(),
-      };
-      const validatedPost = validateQueriedPostSafe(normalizedPost);
+      const validatedPost = validateQueriedPostSafe(rawPost);
       if (!validatedPost) {
         console.log("Validation failed for post:", rawPost._id.toString());
         return null;
       }
-      return validatedPost;
+      const serializablePost = {
+        ...validatedPost,
+        _id: validatedPost._id.toString(),
+      };
+      return serializablePost;
     })
-    .filter((post): post is QPost => post !== null);
+    .filter((post): post is SPost => post !== null);
 
   console.log(`Validated ${sanitizedPosts.length} posts, attaching authors...`);
   const result = await attachAuthorsToPosts(sanitizedPosts);
@@ -349,7 +357,7 @@ export async function findAllPostsWithAuthors(): Promise<
   return result;
 }
 
-export async function findPostsByAuthor(authorId: string): Promise<QPost[]> {
+export async function findPostsByAuthor(authorId: string): Promise<SPost[]> {
   const postsCollection = await getCollection("posts");
   const posts = await postsCollection.find({ author: authorId }).toArray();
 
@@ -369,7 +377,7 @@ export async function findPostsByAuthor(authorId: string): Promise<QPost[]> {
 export async function updatePostById(
   id: string,
   updates: unknown,
-): Promise<QPost | null> {
+): Promise<SPost | null> {
   const postsCollection = await getCollection("posts");
 
   // Validate updates
@@ -403,21 +411,23 @@ export async function updatePostById(
 
 export async function deletePostById(id: string): Promise<boolean> {
   const postsCollection = await getCollection("posts");
-  const result = await postsCollection.deleteOne({ _id: new ObjectId(id) });
+  const result = await postsCollection.deleteOne({
+    _id: new ObjectId(id),
+  });
   return result.deletedCount > 0;
 }
 
 export async function incrementPostLikes(
   id: string,
   userId: string,
-): Promise<QPost | null> {
+): Promise<SPost | null> {
   return addUserToInteraction(id, userId, "interactions.likes");
 }
 
 export async function incrementPostForwards(
   id: string,
   userId: string,
-): Promise<QPost | null> {
+): Promise<SPost | null> {
   return addUserToInteraction(id, userId, "interactions.forwards");
 }
 
@@ -426,16 +436,23 @@ export async function addCommentToPost(
   authorId: string,
   content: string,
 ): Promise<QPost | null> {
-  const postsCollection = await getCollection("posts");
+  const postsCollection = await getCollection<Post>("posts");
 
-  const comment = {
+  // Added: load author for embedding display-friendly data into comments; require a found author.
+  const author = await fetchAuthorById(authorId);
+  if (!author) {
+    return null;
+  }
+
+  const newCommentData = {
     author: authorId,
-    body: { content: content },
-  };
+    body: { content: content, images: [] },
+    createdAt: new Date(),
+  } as PostComment;
 
-  const update: UpdateFilter<Document> = {
+  const update: UpdateFilter<Post> = {
     $push: {
-      "interactions.comments": comment,
+      "interactions.comments": newCommentData,
     },
     $set: { updatedAt: new Date() },
   };
@@ -445,15 +462,55 @@ export async function addCommentToPost(
     update,
     { returnDocument: "after" },
   );
-
   if (!result) return null;
 
   const validatedPost = validateQueriedPostSafe(result);
   if (!validatedPost) return null;
 
+  return validatedPost;
+}
+
+// Update post title/body/images while preserving other fields.
+export async function updatePostContent(
+  postId: string,
+  updates: {
+    title?: string;
+    content?: string;
+    images?: string[];
+  },
+): Promise<Result<SPost>> {
+  const postsCollection = await getCollection<Post>("posts");
+  const set: Record<string, unknown> = {
+    updatedAt: new Date(),
+  };
+
+  if (typeof updates.title === "string") {
+    set.title = updates.title;
+  }
+  if (typeof updates.content === "string") {
+    set["body.content"] = updates.content;
+  }
+  if (updates.images) {
+    set["body.images"] = updates.images;
+  }
+
+  const result = await postsCollection.findOneAndUpdate(
+    { _id: new ObjectId(postId) },
+    { $set: set } as UpdateFilter<Post>,
+    { returnDocument: "after" },
+  );
+
+  if (!result) return { success: false, error: "Post not found" };
+
+  const validatedPost = validateQueriedPostSafe(result);
+  if (!validatedPost) return { success: false, error: "Invalid post data" };
+
   return {
-    ...validatedPost,
-    _id: result._id.toString(),
+    success: true,
+    data: {
+      ...validatedPost,
+      _id: result._id.toString(),
+    },
   };
 }
 

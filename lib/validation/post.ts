@@ -22,6 +22,13 @@ export function validatePostSafe(data: unknown) {
  */
 export function validateQueriedPostSafe(data: unknown) {
   const result = v.safeParse(QueriedPostSchema, data);
+  if (result.success == false) {
+    console.log(`Invalid post:`);
+    console.dir(data, { depth: null });
+    const reasons = result.issues;
+    console.log(`Issues:`);
+    console.dir(reasons, { depth: null });
+  }
   return result.success ? result.output : null;
 }
 
@@ -42,6 +49,7 @@ export function createValidatedPost(data: {
   author: string;
   title: string;
   content: string;
+  images?: string[];
   likes?: number;
   forwards?: number;
   comments?: Array<{ author: string; content: string }>;
@@ -51,6 +59,7 @@ export function createValidatedPost(data: {
     title: data.title,
     body: {
       content: data.content,
+      images: data.images ?? [],
     },
     interactions: {
       likes: [],

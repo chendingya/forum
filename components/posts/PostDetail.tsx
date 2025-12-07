@@ -1,7 +1,6 @@
 "use client";
-
 import { Card } from "@/components/ui/card";
-import { QPost, PostComment } from "@/schema/post";
+import { QPost, PostComment as OriginalPostComment } from "@/schema/post";
 import { QUser } from "@/schema/user";
 import { useState } from "react";
 import { Heart, MessageCircle, Share2 } from "lucide-react";
@@ -12,25 +11,34 @@ import {
 } from "@/app/actions/post";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { dark } from "react-syntax-highlighter/dist/esm/styles/prism";
+
+type PopulatedPostComment = Omit<OriginalPostComment, "author"> & {
+  author: QUser | null;
+};
+
+type PopulatedQPost = Omit<QPost, "author" | "interactions"> & {
+  author: QUser;
+  interactions: {
+    comments: PopulatedPostComment[];
+    likes: string[];
+    forwards: string[];
+  };
+};
 
 interface PostDetailProps {
-  post: QPost & {
-    author: QUser;
-    createdAt: Date;
-    interactions: {
-      likes: QUser[];
-      forwards: QUser[];
-      comments: PostComment[];
-    };
-  };
+  post: PopulatedQPost;
+  // currentUserId is used to decide whether to show edit controls.
+  currentUserId?: string;
 }
 
-export function PostDetail({ post }: PostDetailProps) {
+export function PostDetail({ post, currentUserId }: PostDetailProps) {
   const [likes, setLikes] = useState(post.interactions?.likes?.length || 0);
   const [forwards, setForwards] = useState(
     post.interactions?.forwards?.length || 0,
   );
-  const [comments, setComments] = useState<PostComment[]>(
+  const [comments, setComments] = useState<PopulatedPostComment[]>(
     post.interactions?.comments || [],
   );
   const [newComment, setNewComment] = useState("");
@@ -44,7 +52,7 @@ export function PostDetail({ post }: PostDetailProps) {
     setIsLiking(true);
     const result = await incrementPostLikes(post._id as string);
     if (result.success) {
-      setLikes(result.likes);
+      setLikes(result.data);
     }
     setIsLiking(false);
   };
@@ -55,7 +63,7 @@ export function PostDetail({ post }: PostDetailProps) {
     setIsForwarding(true);
     const result = await incrementPostForwards(post._id as string);
     if (result.success) {
-      setForwards(result.forwards);
+      setForwards(result.data);
     }
     setIsForwarding(false);
   };
@@ -70,7 +78,7 @@ export function PostDetail({ post }: PostDetailProps) {
       newComment.trim(),
     );
     if (result.success) {
-      setComments(result.comments as PostComment[]);
+      setComments(result.data.comments as PopulatedPostComment[]);
       setNewComment("");
     }
     setIsAddingComment(false);
@@ -132,7 +140,6 @@ export function PostDetail({ post }: PostDetailProps) {
                 const match = /language-(\w+)/.exec(className || "");
                 return match ? (
                   <SyntaxHighlighter
-                    {...rest}
                     PreTag="div"
                     language={match[1]}
                     style={dark}
@@ -170,6 +177,20 @@ export function PostDetail({ post }: PostDetailProps) {
             {post.body.content}
           </Markdown>
 
+          {/* Render attached images if present. */}
+          {post.body.images && post.body.images.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4">
+              {post.body.images.map((src, idx) => (
+                <img
+                  key={idx}
+                  src={src}
+                  alt={`Post image ${idx + 1}`}
+                  className="w-full rounded-lg border object-cover"
+                />
+              ))}
+            </div>
+          )}
+
           <div className="flex items-center space-x-6 text-sm text-gray-500 pt-4 border-t">
             <button
               onClick={handleLike}
@@ -195,6 +216,15 @@ export function PostDetail({ post }: PostDetailProps) {
               <MessageCircle className="h-4 w-4" />
               <span>{comments?.length || 0} comments</span>
             </div>
+
+            {currentUserId && currentUserId === post.author._id && (
+              <a
+                href={`/posts/${post._id}/edit`}
+                className="text-blue-600 hover:underline"
+              >
+                Edit post
+              </a>
+            )}
           </div>
         </div>
       </Card>
@@ -235,15 +265,18 @@ export function PostDetail({ post }: PostDetailProps) {
               <div key={index} className="border-l-2 border-gray-200 pl-4 py-2">
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-sm text-gray-900">
-                    User {comment.author}
+                    {getCommentAuthorDisplay(comment.author)}
                   </span>
                   <span className="text-xs text-gray-500">
                     {comment.createdAt
-                      ? new Date(comment.createdAt).toLocaleDateString("en-US", {
-                          year: "numeric",
-                          month: "short",
-                          day: "numeric",
-                        })
+                      ? new Date(comment.createdAt).toLocaleDateString(
+                          "en-US",
+                          {
+                            year: "numeric",
+                            month: "short",
+                            day: "numeric",
+                          },
+                        )
                       : ""}
                   </span>
                 </div>
@@ -255,4 +288,12 @@ export function PostDetail({ post }: PostDetailProps) {
       </Card>
     </div>
   );
+}
+
+// Added: normalize comment author display using name when available.
+function getCommentAuthorDisplay(author: QUser | null) {
+  if (!author) {
+    return "Unknown";
+  }
+  return author.name;
 }
