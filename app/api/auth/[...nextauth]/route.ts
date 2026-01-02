@@ -1,3 +1,4 @@
+import "@/lib/config"; // Ensure config is loaded and env vars are injected first
 import NextAuth from "next-auth";
 import { authOptions } from "@/lib/auth/options";
 
