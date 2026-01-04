@@ -57,17 +57,47 @@ export async function signupAction(
   }
 
   // Validate email suffix
-  const hasAllowedSuffix = config.allowedEmailSuffixes.some((suffix) =>
-    email.endsWith(suffix),
-  );
-  if (!hasAllowedSuffix) {
-    return {
-      success: false,
-      error: `Email must end with one of: ${config.allowedEmailSuffixes.join(", ")}`,
-    };
-  }
+  // const hasAllowedSuffix = config.allowedEmailSuffixes.some((suffix) =>
+  //   email.endsWith(suffix),
+  // );
+  // if (!hasAllowedSuffix) {
+  //   return {
+  //     success: false,
+  //     error: `Email must end with one of: ${config.allowedEmailSuffixes.join(", ")}`,
+  //   };
+  // }
+    //  === fix ===
+    // Validate email suffix (case-insensitive, safe boundary, allow subdomains)
+    const normalizedEmail = email.trim();
+    const at = normalizedEmail.lastIndexOf("@");
+    if (at <= 0 || at === normalizedEmail.length - 1) {
+        return { success: false, error: "Invalid email format" };
+    }
 
-  const existingUser = await findUserByName(name);
+    const domain = normalizedEmail
+        .slice(at + 1)
+        .trim()
+        .toLowerCase()
+        .replace(/\.+$/, ""); // remove trailing dot(s)
+
+    const allowedSuffixes = (config.allowedEmailSuffixes ?? [])
+        .map((s) => s.trim().toLowerCase().replace(/^@+/, "").replace(/\.+$/, ""))
+        .filter(Boolean);
+
+    const hasAllowedSuffix = allowedSuffixes.some(
+        (suffix) => domain === suffix || domain.endsWith("." + suffix),
+    );
+
+    if (!hasAllowedSuffix) {
+        return {
+            success: false,
+            error: `Email must be under one of: ${allowedSuffixes.join(", ")}`,
+        };
+    }
+
+
+    // Check if user already exists
+    const existingUser = await findUserByName(name);
   if (existingUser) {
     return { success: false, error: "User already exists" };
   }
